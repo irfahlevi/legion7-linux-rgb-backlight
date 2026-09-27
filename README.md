@@ -1,4 +1,4 @@
-# legion7-rgb-backlight
+# legion7-linux-rgb-backlight
 
 Control the RGB lighting of the **Lenovo Legion 7 16ACHg6** (Legion 7 Gen 6, AMD)
 on Linux: per-zone colors for the keyboard, logo, vents and neon strip, with
@@ -58,8 +58,8 @@ many other Legion models, try [OpenRGB](https://openrgb.org),
 ## Install
 
 ```bash
-git clone https://github.com/irfahlevi/legion7-rgb-backlight.git
-cd legion7-rgb-backlight
+git clone https://github.com/irfahlevi/legion7-linux-rgb-backlight.git
+cd legion7-linux-rgb-backlight
 ./install.sh              # udev rule + app-menu launcher
 # or
 ./install.sh --autostart  # same, plus restore your colors at every login
