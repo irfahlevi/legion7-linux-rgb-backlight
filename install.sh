@@ -7,11 +7,14 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RULE=/etc/udev/rules.d/99-legion-rgb.rules
 APPS="$HOME/.local/share/applications"
 AUTOSTART="$HOME/.config/autostart"
+ICONS="$HOME/.local/share/icons/hicolor"
+SIZES="48 64 128 256"
 
 if [[ "${1:-}" == "--uninstall" ]]; then
     sudo rm -f "$RULE"
     sudo udevadm control --reload-rules
     rm -f "$APPS/legion-rgb.desktop" "$AUTOSTART/legion-rgb-restore.desktop"
+    for n in $SIZES; do rm -f "$ICONS/${n}x${n}/apps/legion-rgb.png"; done
     echo "Uninstalled. Settings remain in ~/.config/legion-rgb/."
     exit 0
 fi
@@ -23,6 +26,11 @@ sudo cp "$DIR/99-legion-rgb.rules" "$RULE"
 sudo udevadm control --reload-rules
 sudo udevadm trigger --subsystem-match=hidraw
 
+for n in $SIZES; do
+    install -Dm644 "$DIR/assets/icon-$n.png" "$ICONS/${n}x${n}/apps/legion-rgb.png"
+done
+gtk-update-icon-cache -q -t "$ICONS" 2>/dev/null || true
+
 mkdir -p "$APPS"
 cat > "$APPS/legion-rgb.desktop" <<EOF
 [Desktop Entry]
@@ -31,7 +39,8 @@ Name=Legion Backlit RGB
 Comment=Control Legion 7 16ACHg6 keyboard, logo, vent and strip lighting
 Exec="$DIR/legion-rgb-gui"
 Path=$DIR
-Icon=preferences-desktop-color
+Icon=legion-rgb
+StartupWMClass=Legion-rgb
 Terminal=false
 Categories=Settings;HardwareSettings;
 EOF

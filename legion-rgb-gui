@@ -15,6 +15,7 @@ from legion_rgb.privilege import (config_dir, device_writable, have_pkexec,
                                   run_cli_elevated)
 
 LAST_FILE = os.path.join(config_dir(), "last.json")
+ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 CLI_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "legion-rgb-cli")
 DEFAULT_COLOR = (0, 180, 255)
 PRESETS = {
@@ -65,8 +66,14 @@ def save_last(state):
 
 class App(tk.Tk):
     def __init__(self):
-        super().__init__()
+        super().__init__(className="legion-rgb")
         self.title("Legion Backlit RGB")
+        try:
+            self._icons = [tk.PhotoImage(file=os.path.join(ASSETS, f"icon-{n}.png"))
+                           for n in (256, 64, 48)]
+            self.iconphoto(True, *self._icons)
+        except tk.TclError:
+            pass
         self.resizable(False, False)
         self.kb = None
         try:

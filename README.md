@@ -159,8 +159,10 @@ Layout:
 legion-rgb-gui          Tkinter GUI
 legion-rgb-cli          command line
 legion-rgb-restore      re-apply last setting (login autostart)
-install.sh              udev rule + launcher + autostart
+install.sh              udev rule + launcher + icon + autostart
 99-legion-rgb.rules     udev rule (hidraw 048d:c968 → user-writable)
+assets/icon-*.png       app icon (48/64/128/256 px)
+tools/make_icon.py      regenerates the icon (needs Pillow; dev only)
 legion_rgb/
   detector.py           finds /dev/hidrawN for 048d:c968
   hid.py                hidraw SET_FEATURE ioctl
