@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""legion-rgb-cli: control Legion 7 16ACHg6 RGB (ITE 048d:c968) from terminal.
+
+Examples:
+  legion-rgb-cli status
+  legion-rgb-cli static FF0000                         # everything red
+  legion-rgb-cli static FF0000 FFFFFF 0000FF 00FF00    # keyboard logo vents neon
+  legion-rgb-cli static FF0000 -b 50                   # 50% brightness
+  legion-rgb-cli breath 00BFFF -s 2                    # breathing until Ctrl+C
+  legion-rgb-cli identify                              # light each zone in turn
+  legion-rgb-cli off
+  legion-rgb-cli hardware                              # hand back to firmware effects
+"""
+import argparse
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from legion_rgb.detector import find_keyboard, LegionKeyboardNotFound
+from legion_rgb.protocol_direct import LegionDirect, GROUPS, ZONES, parse_hex_color
+from legion_rgb.privilege import config_dir, pkexec_hint
+
+LAST_FILE = os.path.join(config_dir(), "last.json")
+CLI_PATH = os.path.abspath(__file__)
+
+
+def save_last(state):
+    try:
+        os.makedirs(os.path.dirname(LAST_FILE), exist_ok=True)
+        with open(LAST_FILE, "w") as f:
+            json.dump(state, f)
+    except OSError:
+        pass
+
+
+def expand_groups(colors):
+    if len(colors) == 1:
+        c = parse_hex_color(colors[0])
+        return {g: c for g in GROUPS}
+    if len(colors) == 4:
+        return {g: parse_hex_color(c) for g, c in zip(GROUPS, colors)}
+    raise ValueError("give 1 color (everything) or 4 colors (keyboard logo vents neon)")
+
+
+def cmd_identify(kb):
+    demo = [(0xFF, 0, 0), (0, 0xFF, 0), (0, 0, 0xFF), (0xFF, 0xFF, 0xFF)]
+    for zone, color in zip(GROUPS, demo):
+        kb.set({g: (color if g == zone else (0, 0, 0)) for g in GROUPS})
+        input(f"  {ZONES[zone][0]} ({zone:#04x}) lit. Enter for next ")
+    kb.off()
+
+
+def main():
+    p = argparse.ArgumentParser(description="Legion 7 16ACHg6 RGB control (048d:c968)")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("status", help="show detected controller and last setting")
+
+    s = sub.add_parser("static", help="solid color(s)")
+    s.add_argument("colors", nargs="+", help="RRGGBB (1, or 4: keyboard logo vents neon)")
+    s.add_argument("-b", "--brightness", type=int, default=100)
+
+    s = sub.add_parser("breath", help="software breathing effect (runs until Ctrl+C)")
+    s.add_argument("colors", nargs="+", help="RRGGBB (1 or 4)")
+    s.add_argument("-s", "--speed", type=int, default=2, choices=[1, 2, 3, 4])
+    s.add_argument("-b", "--brightness", type=int, default=100)
+
+    sub.add_parser("identify", help="light each zone separately")
+    sub.add_parser("off", help="turn all LEDs off")
+    sub.add_parser("hardware", help="release control back to firmware effects (Fn+Space)")
+
+    a = p.parse_args()
+    try:
+        dev, vid, pid = find_keyboard()
+    except LegionKeyboardNotFound as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    if a.cmd == "status":
+        print(f"Controller {vid:04x}:{pid:04x} at {dev}")
+        if os.path.exists(LAST_FILE):
+            with open(LAST_FILE) as f:
+                print(f"Last applied: {f.read().strip()}")
+        return 0
+
+    kb = LegionDirect(dev)
+    try:
+        if a.cmd == "static":
+            colors = expand_groups(a.colors)
+            kb.set(colors, a.brightness)
+            save_last({"effect": "Static", "colors": [list(c) for c in colors.values()],
+                       "brightness": a.brightness})
+        elif a.cmd == "breath":
+            colors = expand_groups(a.colors)
+            save_last({"effect": "Breath", "colors": [list(c) for c in colors.values()],
+                       "brightness": a.brightness, "speed": a.speed})
+            print("Breathing... Ctrl+C to stop.")
+            try:
+                kb.breathe(colors, a.brightness, a.speed)
+            except KeyboardInterrupt:
+                kb.set(colors, a.brightness)
+        elif a.cmd == "identify":
+            cmd_identify(kb)
+        elif a.cmd == "off":
+            kb.off()
+            save_last({"effect": "Static", "colors": [[0, 0, 0]] * 4, "brightness": 0})
+        elif a.cmd == "hardware":
+            kb.hardware_mode()
+            save_last({"effect": "Hardware"})
+        print(f"OK: {a.cmd} applied to {dev}")
+        return 0
+    except PermissionError:
+        print(f"Permission denied on {dev}. Either:", file=sys.stderr)
+        print(f"  {pkexec_hint(CLI_PATH, sys.argv[1:])}", file=sys.stderr)
+        print("  sudo cp 99-legion-rgb.rules /etc/udev/rules.d/ && "
+              "sudo udevadm control --reload-rules && sudo udevadm trigger",
+              file=sys.stderr)
+        return 1
+    except (ValueError, OSError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

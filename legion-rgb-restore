@@ -1,0 +1,33 @@
+#!/usr/bin/env python3
+"""Re-apply last saved Legion RGB setting (for autostart)."""
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from legion_rgb.detector import find_keyboard
+from legion_rgb.protocol_direct import LegionDirect, GROUPS
+from legion_rgb.privilege import config_dir
+
+LAST_FILE = os.path.join(config_dir(), "last.json")
+
+try:
+    with open(LAST_FILE) as f:
+        d = json.load(f)
+    if d.get("effect") == "Hardware":
+        sys.exit(0)
+    dev, _, _ = find_keyboard()
+    kb = LegionDirect(dev)
+    colors = {g: tuple(c) for g, c in zip(GROUPS, d["colors"])}
+    brightness = d.get("brightness", 100)
+    if d.get("effect") == "Breath":
+        kb.breathe(colors, brightness, d.get("speed", 2))
+    else:
+        kb.set(colors, brightness)
+        print(f"Restored static on {dev}")
+except FileNotFoundError:
+    sys.exit(0)
+except Exception as e:
+    print(f"legion-rgb-restore: {e}", file=sys.stderr)
+    sys.exit(1)

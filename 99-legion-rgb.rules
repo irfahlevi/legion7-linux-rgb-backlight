@@ -1,0 +1,2 @@
+# Non-root access to the Legion 7 16ACHg6 RGB controller (ITE 048d:c968)
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="048d", ATTRS{idProduct}=="c968", MODE="0666"
