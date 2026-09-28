@@ -140,7 +140,7 @@ The controller is an ITE 8258 exposed as `/dev/hidrawN`. Every command is a
 | Packet | Meaning |
 |---|---|
 | `07 B2 00…` | **Software mode:** firmware displays colors sent by the host |
-| `07 B1 00…` | **Hardware mode:** firmware effects / Fn+Space again |
+| `07 B1 00…` | **Hardware mode (global):** firmware effects on all zones (`legion-rgb-cli hardware` / GUI Firmware effects) |
 | `07 <zone> <N> 00 (led, R, G, B)×N` | Set N LEDs in a zone, up to 47 per packet |
 
 | Zone byte | Area | LEDs |
@@ -152,6 +152,22 @@ The controller is an ITE 8258 exposed as `/dev/hidrawN`. Every command is a
 
 `07 B2` is the key step. Without it the firmware ignores or quickly
 overwrites host colors. Brightness is applied in software by scaling RGB.
+
+`Fn+Space` is **not** the same as `07 B1`. It is handled by the EC and
+cycles the **keyboard zone** through firmware modes (off, wave/animation,
+full-device wave), while other zones keep showing the last host frame.
+Zones therefore desync after `Fn+Space` (e.g. keyboard cycling while other
+zones stay frozen). The full-device firmware wave (rotating rainbow)
+reclaims keyboard, vents and neon strip — vents/strip then settle to
+rainbow static — but the **logo has been observed to stay on the last host
+color** even through that wave. This is EC behavior, not a send bug.
+Recovery: press **Apply** to re-assert `07 B2` on all zones, or **Firmware
+effects** / `legion-rgb-cli hardware` for a clean global `07 B1`
+(verified: `hardware` returns all zones, logo included, to the rotating
+rainbow firmware effect — unlike `Fn+Space`, which leaves the logo stuck).
+Breath
+re-asserts `07 B2` every frame so it retakes the keyboard within ~50 ms;
+Static stays apply-and-exit by design (no daemon).
 
 Layout:
 
@@ -177,8 +193,8 @@ legion_rgb/
 | `No ITE 048d:c968 controller found` | Not a 16ACHg6, or the device is absent. Check `lsusb \| grep 048d`. |
 | `Permission denied on /dev/hidrawN` | Run `./install.sh`, or prefix CLI commands with `pkexec`. |
 | GUI does not start: `No module named tkinter` | `sudo apt install python3-tk` |
-| Colors reset after Fn+Space | Fn+Space switches to firmware effects. Press Apply again. |
-| Colors gone after reboot | Use `./install.sh --autostart`, or re-apply manually. |
+| Colors reset after Fn+Space | Fn+Space cycles keyboard-zone firmware modes; other zones keep the last host frame, so zones desync. Press Apply to retake all zones (`07 B2`), or Firmware effects / `hardware` for a clean global `07 B1`. |
+| Colors gone after reboot | Boot shows a circling rainbow, then the firmware default (static blue on the tested machine) when no autostart is installed. Use `./install.sh --autostart`, or re-apply manually. |
 | One zone does not change | Run `./legion-rgb-cli identify` and check which zones light. Please open an issue with the result. |
 
 ## Notes and limitations
@@ -193,6 +209,10 @@ legion_rgb/
   that a layout lacks caused no problems on the tested machine.
 - **Brightness** is software-scaled RGB. The hardware brightness level
   (Fn+Space / firmware) is not changed.
+- **Fn+Space desync is expected.** The EC drives the keyboard zone;
+  `07 B2` host frames are RAM-only and never saved to firmware. Returning
+  to firmware static (via `Fn+Space` or reboot without autostart) shows the
+  firmware slot (e.g. static blue), not your last software color.
 - **No per-key GUI** yet. The protocol supports per-key colors, but the app
   only exposes the 4 zones.
 - **Lenovo Vantage / Legion Toolkit** do not exist on Linux, but if you

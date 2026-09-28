@@ -104,14 +104,20 @@ class LegionDirect:
         self.set({g: (0, 0, 0) for g in GROUPS})
 
     def breathe(self, group_colors, brightness=100, speed=2, should_run=lambda: True):
-        """Software breathing loop; returns when should_run() is False."""
+        """Software breathing loop; returns when should_run() is False.
+
+        Re-asserts software mode (07 B2) every frame: on the 16ACHg6,
+        Fn+Space is handled by the EC and forces the keyboard zone back
+        to firmware effects (B1). Without this, LED frames sent after
+        an Fn+Space press are ignored until the next Apply.
+        """
         steps = max(4, 24 // speed)
-        self.software_mode()
         while should_run():
             for phase in list(range(steps)) + list(range(steps, 0, -1)):
                 if not should_run():
                     return
                 f = 0.05 + 0.95 * (phase / steps)
+                self.software_mode()
                 for pkt in build_frame(group_colors, f * brightness):
                     send_feature_report(self.hidraw, pkt)
                 time.sleep(0.05)
