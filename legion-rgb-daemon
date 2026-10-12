@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""legion-rgb-daemon: persistent background effect pump.
+
+- Reads last.json (or --profile NAME) and pumps the effect forever,
+  re-asserting 07 B2 every frame so Fn+Space/suspend takeovers heal.
+- Static/hardware = apply-and-exit. Animated = run until SIGTERM/SIGINT.
+- Used by the systemd user unit; can also run manually with --foreground.
+
+Usage:
+  legion-rgb-daemon [--foreground] [--profile NAME] [--pidfile PATH]
+"""
+import argparse
+import json
+import os
+import signal
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from legion_rgb.detector import find_keyboard, LegionKeyboardNotFound
+from legion_rgb.protocol_direct import LegionDirect
+from legion_rgb.privilege import config_dir
+from legion_rgb.state import apply_doc
+from legion_rgb import profiles as profstore
+
+LAST_FILE = os.path.join(config_dir(), "last.json")
+RUN = True
+
+
+def _stop(signum, frame):
+    global RUN
+    RUN = False
+
+
+def load_target(profile=None):
+    if profile:
+        return profstore.load(profile)
+    with open(LAST_FILE) as f:
+        return json.load(f)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--foreground", action="store_true")
+    ap.add_argument("--profile", default=None)
+    ap.add_argument("--pidfile", default=None)
+    ap.add_argument("--no-animated", action="store_true",
+                    help="apply one static frame and exit even for effects")
+    a = ap.parse_args()
+
+    if not a.foreground:
+        # Detach: double-fork lite (single fork + setsid is enough here).
+        if os.fork() != 0:
+            sys.exit(0)
+        os.setsid()
+        if os.fork() != 0:
+            sys.exit(0)
+        sys.stdout = open(os.devnull, "w")
+        sys.stderr = open(os.devnull, "w")
+        sys.stdin = open(os.devnull, "r")
+
+    if a.pidfile:
+        try:
+            os.makedirs(os.path.dirname(a.pidfile), exist_ok=True)
+            with open(a.pidfile, "w") as f:
+                f.write(str(os.getpid()))
+        except OSError:
+            pass
+
+    signal.signal(signal.SIGTERM, _stop)
+    signal.signal(signal.SIGINT, _stop)
+
+    try:
+        doc = load_target(a.profile)
+    except (OSError, ValueError) as e:
+        print(f"legion-rgb-daemon: no state ({e})", file=sys.stderr)
+        return 1
+    effect = (doc.get("effect") or "static").lower()
+    if effect == "hardware":
+        return 0
+    if effect == "static" or a.no_animated:
+        try:
+            dev, _, _ = find_keyboard()
+            apply_doc(LegionDirect(dev), doc, run_animated=False)
+        except (LegionKeyboardNotFound, OSError, ValueError) as e:
+            print(f"legion-rgb-daemon: {e}", file=sys.stderr)
+            return 1
+        return 0
+
+    # Animated: retry loop across suspend/unplug; should_run checks RUN.
+    from legion_rgb.effects import run_effect
+    from legion_rgb.protocol_direct import GROUPS
+    while RUN:
+        try:
+            dev, _, _ = find_keyboard()
+            kb = LegionDirect(dev)
+            colors = [tuple(c) for c in doc.get("colors", [[0, 180, 255]] * 4)]
+            if len(colors) == 1:
+                colors = colors * 4
+            groups = {g: c for g, c in zip(GROUPS, colors)}
+            if effect == "breath":
+                kb.breathe(groups, int(doc.get("brightness", 100)),
+                           int(doc.get("speed", 2)), lambda: RUN)
+            elif effect in ("mirror", "reactive", "audio"):
+                # Daemon only handles pure software effects; fall back static.
+                apply_doc(kb, doc, run_animated=False)
+                return 0
+            else:
+                run_effect(kb, effect, groups,
+                           int(doc.get("brightness", 100)),
+                           int(doc.get("speed", 2)),
+                           doc.get("direction", "ltr"),
+                           lambda: RUN)
+            if RUN:
+                time.sleep(2)  # effect returned (stop flag?) - backoff
+        except (LegionKeyboardNotFound, OSError):
+            time.sleep(5)  # suspended/unplugged - retry
+        except ValueError as e:
+            print(f"legion-rgb-daemon: {e}", file=sys.stderr)
+            return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

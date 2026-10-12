@@ -7,25 +7,24 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from legion_rgb.detector import find_keyboard
-from legion_rgb.protocol_direct import LegionDirect, GROUPS
+from legion_rgb.protocol_direct import LegionDirect
 from legion_rgb.privilege import config_dir
+from legion_rgb.state import apply_doc
 
 LAST_FILE = os.path.join(config_dir(), "last.json")
 
 try:
     with open(LAST_FILE) as f:
         d = json.load(f)
-    if d.get("effect") == "Hardware":
+    if d.get("effect") in ("hardware", "Hardware"):
+        sys.exit(0)
+    # Animated effects are owned by the daemon/systemd unit; restore only
+    # applies one static frame so login never hangs.
+    if (d.get("effect") or "static").lower() not in ("static", "off"):
         sys.exit(0)
     dev, _, _ = find_keyboard()
-    kb = LegionDirect(dev)
-    colors = {g: tuple(c) for g, c in zip(GROUPS, d["colors"])}
-    brightness = d.get("brightness", 100)
-    if d.get("effect") == "Breath":
-        kb.breathe(colors, brightness, d.get("speed", 2))
-    else:
-        kb.set(colors, brightness)
-        print(f"Restored static on {dev}")
+    apply_doc(LegionDirect(dev), d, run_animated=False)
+    print(f"Restored static on {dev}")
 except FileNotFoundError:
     sys.exit(0)
 except Exception as e:

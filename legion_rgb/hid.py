@@ -1,7 +1,11 @@
-"""hidraw HID feature-report sender (stdlib only: os + fcntl)."""
+"""hidraw HID feature-report sender (stdlib only: os + fcntl, Linux)."""
 import array
-import fcntl
 import os
+
+try:
+    import fcntl
+except ImportError:  # Windows/macOS dev machines: importable, fails on send.
+    fcntl = None
 
 
 def _hidiocs_feature(length):
@@ -11,6 +15,8 @@ def _hidiocs_feature(length):
 
 def send_feature_report(hidraw_path, data: bytes):
     """Send one HID SET_FEATURE report. data[0] must be the report ID."""
+    if fcntl is None:
+        raise RuntimeError("hidraw is Linux-only (no fcntl on this platform)")
     if len(data) < 2 or data[0] == 0x00:
         raise ValueError("Payload must start with a non-zero report ID")
     buf = array.array("B", data)

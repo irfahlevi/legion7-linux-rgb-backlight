@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""legion-rgb-gui: Tkinter GUI for Legion 7 16ACHg6 RGB (ITE 048d:c968)."""
+"""legion-rgb-gui: Tkinter GUI for Legion RGB (ITE 048d:c968/c967)."""
 import json
 import os
 import sys
@@ -9,10 +9,12 @@ from tkinter import colorchooser, messagebox, ttk
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from legion_rgb.detector import find_keyboard, LegionKeyboardNotFound
-from legion_rgb.protocol_direct import LegionDirect, GROUPS, ZONES
+from legion_rgb.detector import find_keyboard, LegionKeyboardNotFound, PID_NAMES
+from legion_rgb.protocol_direct import LegionDirect, GROUPS, ZONES, scale
+from legion_rgb.effects import EFFECTS, DIRECTIONS, run_effect
 from legion_rgb.privilege import (config_dir, device_writable, have_pkexec,
                                   run_cli_elevated)
+from legion_rgb import profiles as profstore
 
 LAST_FILE = os.path.join(config_dir(), "last.json")
 ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
@@ -33,6 +35,22 @@ PRESETS = {
 }
 CUSTOM = "Custom"
 
+DISPLAY = {
+    "Static": "static",
+    "Breath": "breath",
+    "Rainbow wave": "rainbow_wave",
+    "Rainbow screw": "rainbow_screw",
+    "Color wave": "color_wave",
+    "Color pulse": "color_pulse",
+    "Color shift": "color_shift",
+    "Visor": "visor",
+    "Rain": "rain",
+    "Smooth": "smooth",
+    "Ripple loop": "ripple",
+}
+DISPLAY_REV = {v: k for k, v in DISPLAY.items()}
+ANIMATED_NEED_DIRECT = set(EFFECTS) - {"static"}
+
 
 def preset_name(c):
     return next((n for n, v in PRESETS.items() if v == tuple(c)), CUSTOM)
@@ -49,10 +67,14 @@ def load_last():
     except (OSError, ValueError):
         d = {}
     colors = [tuple(c) for c in d.get("colors", [])]
+    if len(colors) == 1:
+        colors = colors * 4
     if len(colors) != 4:
         colors = [DEFAULT_COLOR] * 4
-    effect = d.get("effect") if d.get("effect") in ("Static", "Breath") else "Static"
-    return effect, colors, d.get("brightness", 100) or 100, d.get("speed", 2)
+    eff = str(d.get("effect", "static")).lower()
+    effect_display = DISPLAY_REV.get(eff, "Static")
+    return effect_display, colors, d.get("brightness", 100) or 100, d.get("speed", 2), \
+        d.get("direction", "ltr")
 
 
 def save_last(state):
@@ -62,6 +84,68 @@ def save_last(state):
             json.dump(state, f)
     except OSError:
         pass
+
+
+class PerKeyEditor(tk.Toplevel):
+    """Grid painter for keyboard-zone LEDs (A1)."""
+
+    def __init__(self, master, kb, brightness):
+        super().__init__(master)
+        self.title("Per-key editor (Keyboard A1)")
+        self.kb = kb
+        self.brightness = brightness
+        self.paint = list(DEFAULT_COLOR)
+        self.cells = {}  # led_id -> (r,g,b)
+        top = ttk.Frame(self)
+        top.pack(padx=10, pady=8, fill="x")
+        self.paint_btn = tk.Button(top, bg=rgb_to_hex(self.paint), width=6,
+                                   command=self.choose_paint)
+        self.paint_btn.pack(side="left")
+        ttk.Label(top, text="Click keys to paint, right-click to clear").pack(side="left", padx=8)
+        ttk.Button(top, text="Apply", command=self.apply).pack(side="right", padx=4)
+        ttk.Button(top, text="Clear", command=self.clear).pack(side="right")
+        grid = ttk.Frame(self)
+        grid.pack(padx=10, pady=(0, 10))
+        ids = sorted(ZONES[0xA1][1])
+        cols = 12
+        self.buttons = {}
+        for i, led in enumerate(ids):
+            b = tk.Button(grid, text=f"{led:02X}", width=5, bg="#222222", fg="white",
+                          command=lambda led=led: self.paint_one(led))
+            b.bind("<Button-3>", lambda e, led=led: self.clear_one(led))
+            b.grid(row=i // cols, column=i % cols, padx=1, pady=1)
+            self.buttons[led] = b
+
+    def choose_paint(self):
+        c = colorchooser.askcolor(color=rgb_to_hex(self.paint), title="Paint color")
+        if c and c[0]:
+            self.paint = [int(v) for v in c[0]]
+            self.paint_btn.configure(bg=rgb_to_hex(self.paint))
+
+    def paint_one(self, led):
+        self.cells[led] = tuple(self.paint)
+        self.buttons[led].configure(bg=rgb_to_hex(self.paint), fg="black")
+
+    def clear_one(self, led):
+        self.cells.pop(led, None)
+        self.buttons[led].configure(bg="#222222", fg="white")
+
+    def clear(self):
+        self.cells.clear()
+        for b in self.buttons.values():
+            b.configure(bg="#222222", fg="white")
+
+    def apply(self):
+        if not self.cells:
+            return
+        led_colors = {(0xA1, led): scale(c, self.brightness) for led, c in self.cells.items()}
+        try:
+            self.kb.set_perkey(led_colors)
+            save_last({"effect": "static",
+                       "perkey": {f"0xA1:{led:#04x}": list(c) for led, c in self.cells.items()},
+                       "brightness": self.brightness})
+        except OSError as e:
+            messagebox.showerror("Error", str(e))
 
 
 class App(tk.Tk):
@@ -79,22 +163,23 @@ class App(tk.Tk):
         try:
             self.dev, vid, pid = find_keyboard()
             self.kb = LegionDirect(self.dev)
-            label = f"{vid:04x}:{pid:04x} at {self.dev}"
+            label = f"{vid:04x}:{pid:04x} {PID_NAMES.get(pid, '')} at {self.dev}"
             self.direct = device_writable(self.dev)
             if not self.direct:
-                label += ("  (password via pkexec; install udev rule for breath)"
+                label += ("  (password via pkexec; install udev rule for animation)"
                           if have_pkexec() else "  (NOT WRITABLE: install udev rule)")
         except LegionKeyboardNotFound as e:
             self.direct = False
             label = str(e)
 
-        effect0, colors0, bright0, speed0 = load_last()
+        effect0, colors0, bright0, speed0, dir0 = load_last()
         self.zone_colors = list(colors0)
         self.effect = tk.StringVar(value=effect0)
         self.brightness = tk.IntVar(value=bright0)
         self.speed = tk.IntVar(value=speed0)
+        self.direction = tk.StringVar(value=dir0 if dir0 in DIRECTIONS else "ltr")
         self.status = tk.StringVar(value=label)
-        self._breath_stop = threading.Event()
+        self._fx_stop = threading.Event()
 
         ttk.Label(self, textvariable=self.status, foreground="gray").pack(padx=12, pady=(10, 2))
 
@@ -123,22 +208,38 @@ class App(tk.Tk):
                           state="readonly", width=12)
         cb.pack(side="left", padx=6)
         cb.bind("<<ComboboxSelected>>", lambda e: self.choose_all(self.all_preset.get()))
+        ttk.Button(ar, text="Per-key…", command=self.open_perkey).pack(side="right")
 
         ef = ttk.LabelFrame(self, text="Effect")
         ef.pack(padx=12, pady=6, fill="x")
-        effects = ("Static", "Breath") if self.direct else ("Static",)
+        effects = tuple(DISPLAY) if self.direct else ("Static",)
         if self.effect.get() not in effects:
             self.effect.set("Static")
-        ttk.OptionMenu(ef, self.effect, self.effect.get(), *effects).pack(
-            padx=8, pady=4, anchor="w")
+        r1 = ttk.Frame(ef)
+        r1.pack(fill="x", padx=8, pady=4)
+        ttk.OptionMenu(r1, self.effect, self.effect.get(), *effects).pack(side="left")
+        ttk.Label(r1, text="Dir:").pack(side="left", padx=(10, 2))
+        ttk.OptionMenu(r1, self.direction, self.direction.get(), *DIRECTIONS).pack(side="left")
         for text, var, lo, hi in (("Brightness %:", self.brightness, 5, 100),
-                                  ("Breath speed:", self.speed, 1, 4)):
+                                  ("Speed:", self.speed, 1, 4)):
             r = ttk.Frame(ef)
             r.pack(fill="x", padx=8, pady=2)
             ttk.Label(r, text=text, width=13).pack(side="left")
             ttk.Scale(r, from_=lo, to=hi, variable=var, orient="horizontal", length=150,
                       command=lambda v, var=var: var.set(round(float(v)))).pack(side="left", padx=6)
             ttk.Label(r, textvariable=var).pack(side="left")
+
+        pf = ttk.LabelFrame(self, text="Profiles")
+        pf.pack(padx=12, pady=6, fill="x")
+        pr = ttk.Frame(pf)
+        pr.pack(fill="x", padx=8, pady=4)
+        self.profile_name = tk.StringVar()
+        self.profile_box = ttk.Combobox(pr, textvariable=self.profile_name, width=18,
+                                        values=profstore.list_names())
+        self.profile_box.pack(side="left")
+        ttk.Button(pr, text="Load", command=self.profile_load).pack(side="left", padx=4)
+        ttk.Button(pr, text="Save", command=self.profile_save).pack(side="left")
+        ttk.Button(pr, text="Del", command=self.profile_del).pack(side="left", padx=4)
 
         btnrow = ttk.Frame(self)
         btnrow.pack(pady=8)
@@ -149,6 +250,9 @@ class App(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.close)
         if self.kb is None:
             messagebox.showerror("Not found", label)
+
+    def refresh_profiles(self):
+        self.profile_box.configure(values=profstore.list_names())
 
     def set_zone(self, i, rgb):
         self.zone_colors[i] = tuple(rgb)
@@ -178,12 +282,67 @@ class App(tk.Tk):
                 self.set_zone(i, rgb)
         self.all_preset.set("Choose…")
 
+    def open_perkey(self):
+        if not self.kb or not self.direct:
+            messagebox.showinfo("Per-key", "Install the udev rule first (needs direct hidraw write).")
+            return
+        PerKeyEditor(self, self.kb, int(self.brightness.get()))
+
     def groups(self):
         return dict(zip(GROUPS, self.zone_colors))
 
+    def current_doc(self):
+        return {"effect": DISPLAY.get(self.effect.get(), "static"),
+                "colors": [list(c) for c in self.zone_colors],
+                "brightness": int(self.brightness.get()),
+                "speed": int(self.speed.get()),
+                "direction": self.direction.get()}
+
+    def profile_save(self):
+        name = self.profile_name.get().strip()
+        if not name:
+            messagebox.showinfo("Profiles", "Type a profile name first.")
+            return
+        try:
+            profstore.save(name, self.current_doc())
+            save_last(self.current_doc())
+            self.refresh_profiles()
+            self.status.set(f"Profile '{name}' saved")
+        except ValueError as e:
+            messagebox.showerror("Profiles", str(e))
+
+    def profile_load(self):
+        name = self.profile_name.get().strip()
+        if not name:
+            return
+        try:
+            doc = profstore.load(name)
+        except (OSError, ValueError) as e:
+            messagebox.showerror("Profiles", str(e))
+            return
+        colors = doc.get("colors", [])
+        if len(colors) == 4:
+            for i, c in enumerate(colors):
+                self.set_zone(i, tuple(c))
+        self.effect.set(DISPLAY_REV.get(doc.get("effect", "static"), "Static"))
+        self.brightness.set(doc.get("brightness", 100))
+        self.speed.set(doc.get("speed", 2))
+        self.direction.set(doc.get("direction", "ltr"))
+        self.apply()
+
+    def profile_del(self):
+        name = self.profile_name.get().strip()
+        if not name:
+            return
+        try:
+            profstore.delete(name)
+            self.refresh_profiles()
+        except OSError as e:
+            messagebox.showerror("Profiles", str(e))
+
     def _run(self, action, cli_args):
         """Run action() directly, or the CLI through pkexec if not writable."""
-        self._breath_stop.set()
+        self._fx_stop.set()
         if not self.kb:
             return False
         try:
@@ -197,43 +356,48 @@ class App(tk.Tk):
             return False
 
     def apply(self):
-        bright = int(self.brightness.get())
+        doc = self.current_doc()
+        name = doc["effect"]
+        bright = doc["brightness"]
         colors = self.groups()
-        if self.effect.get() == "Breath":
-            self.start_breath(colors, bright, int(self.speed.get()))
+        if name != "static":
+            if not self.direct:
+                messagebox.showinfo("Effect", "Animated effects need the udev rule.")
+                return
+            self.start_fx(name, colors, bright, doc["speed"], doc["direction"])
             return
         args = ["static"] + [rgb_to_hex(c)[1:] for c in self.zone_colors] + ["-b", str(bright)]
         if self._run(lambda: self.kb.set(colors, bright), args):
-            save_last({"effect": "Static", "colors": [list(c) for c in self.zone_colors],
-                       "brightness": bright})
+            save_last(doc)
             self.status.set(f"Static applied to {self.dev}")
 
     def turn_off(self):
         if self._run(self.kb.off, ["off"]):
-            save_last({"effect": "Static", "colors": [[0, 0, 0]] * 4, "brightness": 0})
+            save_last({"effect": "static", "colors": [[0, 0, 0]] * 4, "brightness": 0})
             self.status.set("Off")
 
     def hardware(self):
         if self._run(self.kb.hardware_mode, ["hardware"]):
-            save_last({"effect": "Hardware"})
+            save_last({"effect": "hardware"})
             self.status.set("Firmware effects restored (Fn+Space cycles them)")
 
-    def start_breath(self, colors, bright, speed):
-        self._breath_stop.set()
-        stop = self._breath_stop = threading.Event()
-        save_last({"effect": "Breath", "colors": [list(c) for c in self.zone_colors],
-                   "brightness": bright, "speed": speed})
-        self.status.set("Breathing (runs while this window is open)")
+    def start_fx(self, name, colors, bright, speed, direction):
+        self._fx_stop.set()
+        stop = self._fx_stop = threading.Event()
+        save_last({"effect": name, "colors": [list(c) for c in self.zone_colors],
+                   "brightness": bright, "speed": speed, "direction": direction})
+        self.status.set(f"{DISPLAY_REV.get(name, name)} (runs while this window is open)")
 
         def loop():
             try:
-                self.kb.breathe(colors, bright, speed, lambda: not stop.is_set())
+                run_effect(self.kb, name, colors, bright, speed, direction,
+                           lambda: not stop.is_set())
             except OSError as e:
                 self.after(0, lambda: messagebox.showerror("Error", str(e)))
         threading.Thread(target=loop, daemon=True).start()
 
     def close(self):
-        self._breath_stop.set()
+        self._fx_stop.set()
         self.destroy()
 
 

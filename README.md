@@ -1,14 +1,16 @@
 # legion7-linux-rgb-backlight
 
 Control the RGB lighting of the **Lenovo Legion 7 16ACHg6** (Legion 7 Gen 6, AMD)
-on Linux: per-zone colors for the keyboard, logo, vents and neon strip, with
-a small GUI and a CLI. Pure Python 3 standard library: no pip packages and
-no daemon.
+on Linux: per-zone and per-key colors for the keyboard, logo, vents and neon
+strip, with a small GUI and a CLI. Core is pure Python 3 standard library:
+no pip packages needed for static, per-key and 10 software effects.
+Optional extras (`evdev`, `mss`) enable type-ripple and screen-mirror.
 
 > **Tested on one machine only:** Lenovo Legion 7 16ACHg6, product `82N6`,
 > RGB controller ITE `048d:c968`, Ubuntu (GNOME) with kernel 6.18.
-> Other Legion models, including other Gen 6 variants like the 7S / `c967`,
-> have **not** been tested. The app refuses to run on any other controller ID.
+> `048d:c967` (Legion 7S / Slim 7 Gen 6, same protocol per OpenRGB) is now
+> accepted but **not** tested. Please open an issue with
+> `./legion-rgb-cli identify` results on `c967`.
 
 ## Contents
 
@@ -28,11 +30,19 @@ no daemon.
 ## Features
 
 - 4 independently colored zones: **Keyboard**, **Logo**, **Vents**, **Neon strip**
+- **Per-key** keyboard control (`set-key`, per-key GUI painter, JSON maps)
+- 11 software effects: static, breath, rainbow_wave, rainbow_screw,
+  color_wave, color_pulse, color_shift, visor, rain, smooth, ripple loop —
+  with brightness, speed and direction (ltr/rtl)
+- **Profiles**: named save/load/import/export (`~/.config/legion-rgb/profiles/`)
+- **Daemon** + systemd user unit so animated effects survive GUI close/suspend
+- Extras (optional pip deps): **type-ripple** (`evdev`), **screen-mirror**
+  (`mss`, Murals-like), **audio pulse** demo
 - Preset colors (White, Red, Orange, Yellow, Green, Cyan, Sky blue, Blue,
   Purple, Pink, Off) or any custom color
-- Static and software **Breath** effect, adjustable brightness and speed
 - One click back to the built-in firmware effects (Fn+Space)
 - Remembers your last setting and can restore it at login
+- Self-test without hardware: `python3 tools/selftest.py`
 
 ## Check your hardware
 
@@ -44,8 +54,8 @@ cat /sys/class/dmi/id/product_version
 # Legion 7 16ACHg6
 ```
 
-If you do not see `048d:c968`, this tool is not for your laptop. For
-many other Legion models, try [OpenRGB](https://openrgb.org),
+If you do not see `048d:c968` or `048d:c967`, this tool is not for
+your laptop. For many other Legion models, try [OpenRGB](https://openrgb.org),
 [L5P-Keyboard-RGB](https://github.com/4JX/L5P-Keyboard-RGB) or
 [LenovoLegionLinux](https://github.com/johnfanv2/LenovoLegionLinux).
 
@@ -54,6 +64,7 @@ many other Legion models, try [OpenRGB](https://openrgb.org),
 - Python 3.8+ with Tkinter (for the GUI): `sudo apt install python3-tk`
 - `pkexec` (policykit), only if you skip the udev rule
 - A Linux kernel with `hidraw`. Every normal distro kernel has it.
+- Optional: `pip install evdev` (type-ripple), `pip install mss` (screen-mirror).
 
 ## Install
 
@@ -74,7 +85,7 @@ do move it, run `./install.sh` again.
 
 You can also skip installing entirely and run `./legion-rgb-gui` from the
 folder. Without the udev rule, each Apply asks for your password through
-pkexec, and Breath is unavailable.
+pkexec, and animated effects are unavailable.
 
 ## Using the GUI
 
@@ -86,17 +97,22 @@ Open **Legion Backlit RGB** from the app menu, or run:
 
 1. **Zone colors:** pick a color from each zone's dropdown. Choose **Custom**
    or click the color square for any color.
-   **All zones** sets every zone at once.
-2. **Effect:** Static or Breath.
-3. **Brightness %** and **Breath speed** (1 = slow, 4 = fast).
+   **All zones** sets every zone at once. **Per-key…** opens a painter for
+   individual keyboard LEDs (click = paint, right-click = clear).
+2. **Effect:** Static, Breath, Rainbow wave/screw, Color wave/pulse/shift,
+   Visor, Rain, Smooth, Ripple loop — plus direction (ltr/rtl).
+3. **Brightness %** and **speed** (1 = slow, 4 = fast).
 4. Press **Apply**. Nothing changes on the laptop until you do.
 
 Other buttons:
 - **Off:** all LEDs off.
 - **Firmware effects:** hands lighting back to the laptop's built-in effects.
 
-Breath only runs while the GUI window is open. It is animated by the app,
-not by the firmware.
+Profiles frame: type a name, **Save** / **Load** / **Del**. Profiles live in
+`~/.config/legion-rgb/profiles/*.json` and can also be managed from the CLI.
+
+Animated effects run while the GUI window is open (or persistently via the
+daemon below). They are animated by the app, not by the firmware.
 
 ## Using the CLI
 
@@ -106,6 +122,16 @@ not by the firmware.
 ./legion-rgb-cli static 00FF00 FFFFFF FF0000 FFFF00   # keyboard, logo, vents, neon strip
 ./legion-rgb-cli static FFFFFF -b 40                  # white at 40% brightness
 ./legion-rgb-cli breath 00BFFF -s 2                   # breathe; Ctrl+C stops and keeps the color
+./legion-rgb-cli effect rainbow_wave -b 80 -s 3       # any effect (see --help)
+./legion-rgb-cli effect visor FF0000 -d rtl           # direction matters for waves/visor
+./legion-rgb-cli set-key A1:0x01=FF0000 A1:0x02=00FF00 # per-key LEDs
+./legion-rgb-cli perkey keys.json -b 80               # JSON map {"A1:0x01": "FF0000"}
+./legion-rgb-cli profile save gaming --effect rainbow_wave -b 80
+./legion-rgb-cli profile load gaming
+./legion-rgb-cli profile list
+./legion-rgb-cli mirror -b 80                         # screen-mirror (needs mss)
+./legion-rgb-cli reactive 00BFFF                      # type-ripple (needs evdev)
+./legion-rgb-cli audio --demo                         # audio pulse demo mapping
 ./legion-rgb-cli identify                             # light each zone in turn
 ./legion-rgb-cli off                                  # all LEDs off
 ./legion-rgb-cli hardware                             # back to firmware effects
@@ -118,10 +144,13 @@ Without the udev rule, prefix commands with `pkexec`.
 ## Restore on login
 
 The last setting is saved to `~/.config/legion-rgb/last.json` whenever you
-apply. `./install.sh --autostart` adds a login entry that runs
-`legion-rgb-restore`, which re-applies it. A saved Breath effect keeps
-running in the background. Login restore needs the udev rule, because there
-is no password prompt at login.
+apply. `./install.sh --autostart` installs two things:
+`legion-rgb-restore` (XDG autostart desktop, applies one static frame and
+exits — backward compatible) and `legion-rgb.service` (systemd user unit
+running `legion-rgb-daemon --foreground`, which owns animated effects,
+retries across suspend/unplug and re-asserts `07 B2` every frame).
+Login restore needs the udev rule, because there is no password prompt
+at login. Static/hardware = apply-and-exit; animated = persistent pump.
 
 ## Uninstall
 
@@ -165,24 +194,31 @@ Recovery: press **Apply** to re-assert `07 B2` on all zones, or **Firmware
 effects** / `legion-rgb-cli hardware` for a clean global `07 B1`
 (verified: `hardware` returns all zones, logo included, to the rotating
 rainbow firmware effect — unlike `Fn+Space`, which leaves the logo stuck).
-Breath
-re-asserts `07 B2` every frame so it retakes the keyboard within ~50 ms;
-Static stays apply-and-exit by design (no daemon).
+All animated effects re-assert `07 B2` every frame so they retake the
+keyboard within ~50 ms; Static stays apply-and-exit by design.
 
 Layout:
 
 ```
-legion-rgb-gui          Tkinter GUI
-legion-rgb-cli          command line
-legion-rgb-restore      re-apply last setting (login autostart)
-install.sh              udev rule + launcher + icon + autostart
-99-legion-rgb.rules     udev rule (hidraw 048d:c968 → user-writable)
+legion-rgb-gui          Tkinter GUI (zones + per-key painter + profiles)
+legion-rgb-cli          command line (static/effect/set-key/profile/mirror/...)
+legion-rgb-daemon       persistent background pump (systemd user unit)
+legion-rgb-restore      re-apply last static setting (login autostart)
+install.sh              udev rule + launcher + icon + autostart/daemon
+99-legion-rgb.rules     udev rule (hidraw 048d:c968/c967 → user-writable)
 assets/icon-*.png       app icon (48/64/128/256 px)
 tools/make_icon.py      regenerates the icon (needs Pillow; dev only)
+tools/selftest.py       hardware-free logic test (py tools/selftest.py)
 legion_rgb/
-  detector.py           finds /dev/hidrawN for 048d:c968
+  detector.py           finds /dev/hidrawN for 048d:c968/c967
   hid.py                hidraw SET_FEATURE ioctl
-  protocol_direct.py    packets, zones, LED IDs, breath loop
+  protocol_direct.py    packets, zones, LED IDs, per-key frames
+  effects.py            11 software effects + frame pump (stdlib only)
+  profiles.py           named profile store (JSON)
+  state.py              shared apply logic (CLI/daemon/restore)
+  reactive.py           type-ripple (optional evdev)
+  murals.py             screen-mirror (optional mss)
+  audiofx.py            audio pulse mapping (demo backend)
   privilege.py          pkexec helper, real-user config dir under pkexec
 ```
 
@@ -190,7 +226,7 @@ legion_rgb/
 
 | Problem | Fix |
 |---|---|
-| `No ITE 048d:c968 controller found` | Not a 16ACHg6, or the device is absent. Check `lsusb \| grep 048d`. |
+| `No supported ITE controller found (c968/c967)` | Not a supported Legion, or the device is absent. Check `lsusb \| grep 048d`. |
 | `Permission denied on /dev/hidrawN` | Run `./install.sh`, or prefix CLI commands with `pkexec`. |
 | GUI does not start: `No module named tkinter` | `sudo apt install python3-tk` |
 | Colors reset after Fn+Space | Fn+Space cycles keyboard-zone firmware modes; other zones keep the last host frame, so zones desync. Press Apply to retake all zones (`07 B2`), or Firmware effects / `hardware` for a clean global `07 B1`. |
@@ -213,8 +249,9 @@ legion_rgb/
   `07 B2` host frames are RAM-only and never saved to firmware. Returning
   to firmware static (via `Fn+Space` or reboot without autostart) shows the
   firmware slot (e.g. static blue), not your last software color.
-- **No per-key GUI** yet. The protocol supports per-key colors, but the app
-  only exposes the 4 zones.
+- **Extras need pip packages** (`evdev` for type-ripple, `mss` for
+  screen-mirror). Core (static/per-key/10 effects/profiles/daemon) stays
+  stdlib-only. Extras fail with a clear message when the dep is missing.
 - **Lenovo Vantage / Legion Toolkit** do not exist on Linux, but if you
   dual-boot, the Windows lighting app may take control back after you boot
   Windows.

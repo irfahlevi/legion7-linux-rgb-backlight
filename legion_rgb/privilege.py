@@ -4,7 +4,10 @@ The GUI stays unprivileged (Wayland-safe) and elevates only the tiny CLI
 writer via pkexec, which pops a native GNOME password dialog.
 """
 import os
-import pwd
+try:
+    import pwd
+except ImportError:  # Windows dev machines have no pwd; target is Linux.
+    pwd = None
 import shutil
 import subprocess
 import sys
@@ -12,7 +15,11 @@ import sys
 
 def user_home():
     """Real user's home even when running under sudo/pkexec as root."""
-    if os.geteuid() == 0:
+    try:
+        euid = os.geteuid()
+    except AttributeError:
+        euid = None  # Windows: no geteuid
+    if euid == 0 and pwd is not None:
         for var in ("PKEXEC_UID", "SUDO_UID"):
             uid = os.environ.get(var)
             if uid:

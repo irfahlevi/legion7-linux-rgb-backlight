@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""legion-rgb-cli: control Legion 7 16ACHg6 RGB (ITE 048d:c968) from terminal.
+"""legion-rgb-cli: control Legion RGB (ITE 048d:c968/c967) from terminal.
 
 Examples:
   legion-rgb-cli status
@@ -7,6 +7,13 @@ Examples:
   legion-rgb-cli static FF0000 FFFFFF 0000FF 00FF00    # keyboard logo vents neon
   legion-rgb-cli static FF0000 -b 50                   # 50% brightness
   legion-rgb-cli breath 00BFFF -s 2                    # breathing until Ctrl+C
+  legion-rgb-cli effect rainbow_wave -b 80 -s 3        # any effect
+  legion-rgb-cli effect visor FF0000 --direction rtl
+  legion-rgb-cli set-key A1:0x01=FF0000 A1:0x02=00FF00 # per-key LEDs
+  legion-rgb-cli profile save gaming --effect rainbow_wave -b 80
+  legion-rgb-cli profile load gaming                   # static=apply, animated=runs
+  legion-rgb-cli mirror -b 80                          # screen-mirror until Ctrl+C
+  legion-rgb-cli reactive 00BFFF                       # type-ripple until Ctrl+C
   legion-rgb-cli identify                              # light each zone in turn
   legion-rgb-cli off
   legion-rgb-cli hardware                              # hand back to firmware effects
@@ -14,16 +21,26 @@ Examples:
 import argparse
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from legion_rgb.detector import find_keyboard, LegionKeyboardNotFound
-from legion_rgb.protocol_direct import LegionDirect, GROUPS, ZONES, parse_hex_color
+from legion_rgb.detector import find_keyboard, find_all, LegionKeyboardNotFound, PID_NAMES
+from legion_rgb.protocol_direct import LegionDirect, GROUPS, ZONES, parse_hex_color, scale
+from legion_rgb.effects import EFFECTS, DIRECTIONS, run_effect
 from legion_rgb.privilege import config_dir, pkexec_hint
+from legion_rgb import profiles as profstore
 
 LAST_FILE = os.path.join(config_dir(), "last.json")
 CLI_PATH = os.path.abspath(__file__)
+
+ZONE_ALIASES = {
+    "keyboard": 0xA1, "kb": 0xA1, "a1": 0xA1,
+    "logo": 0xA2, "a2": 0xA2,
+    "vents": 0xA3, "vent": 0xA3, "a3": 0xA3,
+    "neon": 0xA4, "strip": 0xA4, "a4": 0xA4,
+}
 
 
 def save_last(state):
@@ -44,6 +61,27 @@ def expand_groups(colors):
     raise ValueError("give 1 color (everything) or 4 colors (keyboard logo vents neon)")
 
 
+def parse_setkey(spec):
+    """A1:0x01=FF0000 | keyboard:1=red-ish | 0x02=00FF00 (keyboard default)."""
+    m = re.match(r"^(?:([A-Za-z0-9]+):)?([0-9A-Fa-fxX]+)=([#0-9A-Za-z]+)$", spec.strip())
+    if not m:
+        raise ValueError(f"bad --set-key spec {spec!r}, want ZONE:LED=RRGGBB")
+    zraw, ledraw, colraw = m.groups()
+    zone = ZONE_ALIASES.get((zraw or "keyboard").lower(), None)
+    if zone is None:
+        try:
+            zone = int(zraw, 0)
+        except (ValueError, TypeError):
+            raise ValueError(f"bad zone {zraw!r} in {spec!r}")
+        if zone not in ZONES:
+            raise ValueError(f"unknown zone {zraw!r}")
+    try:
+        led = int(ledraw, 0)
+    except ValueError:
+        raise ValueError(f"bad LED id {ledraw!r} in {spec!r}")
+    return (zone, led), parse_hex_color(colraw)
+
+
 def cmd_identify(kb):
     demo = [(0xFF, 0, 0), (0, 0xFF, 0), (0, 0, 0xFF), (0xFF, 0xFF, 0xFF)]
     for zone, color in zip(GROUPS, demo):
@@ -52,8 +90,43 @@ def cmd_identify(kb):
     kb.off()
 
 
+def apply_state(kb, doc, run_animated=True):
+    """Apply a profile/last.json doc. Animated effects run until Ctrl+C."""
+    effect = doc.get("effect", "static")
+    brightness = int(doc.get("brightness", 100))
+    speed = int(doc.get("speed", 2))
+    direction = doc.get("direction", "ltr")
+    colors = [tuple(c) for c in doc.get("colors", [[0, 180, 255]] * 4)]
+    if len(colors) == 1:
+        colors = colors * 4
+    groups = {g: c for g, c in zip(GROUPS, colors)}
+    perkey = doc.get("perkey")
+    if perkey:
+        led_colors = {}
+        for k, v in perkey.items():
+            zm, lm = k.split(":")
+            led_colors[(int(zm, 0), int(lm, 0))] = tuple(v)
+        if effect == "static" or not run_animated:
+            kb.set_perkey({k: scale(v, brightness) for k, v in led_colors.items()})
+        else:
+            # perkey + animated: pulse the perkey base via color_pulse path
+            run_effect(kb, effect, groups, brightness, speed, direction)
+        return
+    if effect == "static" or not run_animated:
+        kb.set(groups, brightness)
+    else:
+        print(f"Running {effect}... Ctrl+C to stop.")
+        try:
+            if effect == "breath":
+                kb.breathe(groups, brightness, speed)
+            else:
+                run_effect(kb, effect, groups, brightness, speed, direction)
+        except KeyboardInterrupt:
+            kb.set(groups, brightness)
+
+
 def main():
-    p = argparse.ArgumentParser(description="Legion 7 16ACHg6 RGB control (048d:c968)")
+    p = argparse.ArgumentParser(description="Legion RGB control (048d:c968/c967)")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("status", help="show detected controller and last setting")
 
@@ -66,22 +139,123 @@ def main():
     s.add_argument("-s", "--speed", type=int, default=2, choices=[1, 2, 3, 4])
     s.add_argument("-b", "--brightness", type=int, default=100)
 
+    e = sub.add_parser("effect", help="any software effect (animated run until Ctrl+C)")
+    e.add_argument("name", choices=EFFECTS)
+    e.add_argument("colors", nargs="*", help="RRGGBB (0/1/4; default sky)")
+    e.add_argument("-s", "--speed", type=int, default=2, choices=[1, 2, 3, 4])
+    e.add_argument("-b", "--brightness", type=int, default=100)
+    e.add_argument("-d", "--direction", default="ltr", choices=DIRECTIONS)
+
+    k = sub.add_parser("set-key", help="per-key LEDs, e.g. A1:0x01=FF0000")
+    k.add_argument("specs", nargs="+", help="ZONE:LED=RRGGBB [...]")
+    k.add_argument("-b", "--brightness", type=int, default=100)
+
+    pf = sub.add_parser("perkey", help="apply per-key map from JSON file")
+    pf.add_argument("file", help='JSON like {"A1:0x01": "FF0000"}')
+    pf.add_argument("-b", "--brightness", type=int, default=100)
+
+    pr = sub.add_parser("profile", help="named profiles")
+    prsub = pr.add_subparsers(dest="pcmd", required=True)
+    ps = prsub.add_parser("save", help="save current args as profile")
+    ps.add_argument("name")
+    ps.add_argument("--effect", default="static", choices=EFFECTS)
+    ps.add_argument("colors", nargs="*", help="RRGGBB (0/1/4)")
+    ps.add_argument("-b", "--brightness", type=int, default=100)
+    ps.add_argument("-s", "--speed", type=int, default=2, choices=[1, 2, 3, 4])
+    ps.add_argument("-d", "--direction", default="ltr", choices=DIRECTIONS)
+    pl = prsub.add_parser("load", help="apply profile (animated runs until Ctrl+C)")
+    pl.add_argument("name")
+    prsub.add_parser("list", help="list profiles")
+    pd = prsub.add_parser("delete", help="delete profile")
+    pd.add_argument("name")
+    pi = prsub.add_parser("import", help="import profile JSON file")
+    pi.add_argument("name")
+    pi.add_argument("file")
+    pe = prsub.add_parser("export", help="export profile to JSON file")
+    pe.add_argument("name")
+    pe.add_argument("file")
+
+    m = sub.add_parser("mirror", help="screen-mirror (needs 'mss'; Ctrl+C stops)")
+    m.add_argument("-b", "--brightness", type=int, default=80)
+    m.add_argument("--fps", type=int, default=15)
+
+    r = sub.add_parser("reactive", help="type-ripple (needs 'evdev'; Ctrl+C stops)")
+    r.add_argument("colors", nargs="*", help="RRGGBB (0/1)")
+    r.add_argument("-b", "--brightness", type=int, default=100)
+
+    au = sub.add_parser("audio", help="audio pulse demo (Ctrl+C stops)")
+    au.add_argument("colors", nargs="*", help="RRGGBB (0/1)")
+    au.add_argument("-b", "--brightness", type=int, default=100)
+    au.add_argument("--demo", action="store_true")
+
     sub.add_parser("identify", help="light each zone separately")
     sub.add_parser("off", help="turn all LEDs off")
     sub.add_parser("hardware", help="release control back to firmware effects (Fn+Space)")
 
     a = p.parse_args()
+    if a.cmd == "profile" and a.pcmd == "list":
+        for n in profstore.list_names():
+            print(n)
+        return 0
+    if a.cmd == "profile" and a.pcmd == "delete":
+        try:
+            profstore.delete(a.name)
+            print(f"deleted {a.name}")
+        except OSError as ex:
+            print(f"Error: {ex}", file=sys.stderr)
+            return 1
+        return 0
+    if a.cmd == "profile" and a.pcmd == "export":
+        try:
+            doc = profstore.load(a.name)
+            with open(a.file, "w") as f:
+                json.dump(doc, f, indent=2)
+            print(f"exported {a.name} -> {a.file}")
+        except (OSError, ValueError) as ex:
+            print(f"Error: {ex}", file=sys.stderr)
+            return 1
+        return 0
+    if a.cmd == "profile" and a.pcmd == "import":
+        try:
+            with open(a.file) as f:
+                doc = json.load(f)
+            profstore.save(a.name, doc)
+            print(f"imported {a.file} -> {a.name}")
+        except (OSError, ValueError) as ex:
+            print(f"Error: {ex}", file=sys.stderr)
+            return 1
+        return 0
+    if a.cmd == "profile" and a.pcmd == "save":
+        try:
+            colors = [list(parse_hex_color(c)) for c in a.colors] if a.colors else [[0, 180, 255]] * 4
+            if len(colors) == 1:
+                colors = colors * 4
+            profstore.save(a.name, {"effect": a.effect, "colors": colors,
+                                    "brightness": a.brightness, "speed": a.speed,
+                                    "direction": a.direction})
+            print(f"saved {a.name}")
+        except ValueError as ex:
+            print(f"Error: {ex}", file=sys.stderr)
+            return 1
+        return 0
+
     try:
         dev, vid, pid = find_keyboard()
-    except LegionKeyboardNotFound as e:
-        print(f"Error: {e}", file=sys.stderr)
+    except LegionKeyboardNotFound as ex:
+        print(f"Error: {ex}", file=sys.stderr)
         return 1
 
     if a.cmd == "status":
-        print(f"Controller {vid:04x}:{pid:04x} at {dev}")
+        pname = PID_NAMES.get(pid, "")
+        print(f"Controller {vid:04x}:{pid:04x} {pname} at {dev}")
+        for d, v, pp in find_all():
+            print(f"  - {v:04x}:{pp:04x} at {d}")
         if os.path.exists(LAST_FILE):
             with open(LAST_FILE) as f:
                 print(f"Last applied: {f.read().strip()}")
+        names = profstore.list_names()
+        if names:
+            print(f"Profiles: {', '.join(names)}")
         return 0
 
     kb = LegionDirect(dev)
@@ -89,25 +263,96 @@ def main():
         if a.cmd == "static":
             colors = expand_groups(a.colors)
             kb.set(colors, a.brightness)
-            save_last({"effect": "Static", "colors": [list(c) for c in colors.values()],
+            save_last({"effect": "static", "colors": [list(c) for c in colors.values()],
                        "brightness": a.brightness})
         elif a.cmd == "breath":
             colors = expand_groups(a.colors)
-            save_last({"effect": "Breath", "colors": [list(c) for c in colors.values()],
+            save_last({"effect": "breath", "colors": [list(c) for c in colors.values()],
                        "brightness": a.brightness, "speed": a.speed})
             print("Breathing... Ctrl+C to stop.")
             try:
                 kb.breathe(colors, a.brightness, a.speed)
             except KeyboardInterrupt:
                 kb.set(colors, a.brightness)
+        elif a.cmd == "effect":
+            colors = expand_groups(a.colors) if a.colors else {g: (0, 180, 255) for g in GROUPS}
+            save_last({"effect": a.name, "colors": [list(c) for c in colors.values()],
+                       "brightness": a.brightness, "speed": a.speed, "direction": a.direction})
+            if a.name == "static":
+                kb.set(colors, a.brightness)
+            else:
+                print(f"Running {a.name}... Ctrl+C to stop.")
+                try:
+                    run_effect(kb, a.name, colors, a.brightness, a.speed, a.direction)
+                except KeyboardInterrupt:
+                    kb.set(colors, a.brightness)
+        elif a.cmd == "set-key":
+            led_colors = {}
+            for spec in a.specs:
+                (zone, led), col = parse_setkey(spec)
+                led_colors[(zone, led)] = scale(col, a.brightness)
+            kb.set_perkey(led_colors)
+            save_last({"effect": "static",
+                       "perkey": {f"{z:#04x}:{l:#04x}": list(c) for (z, l), c in led_colors.items()},
+                       "brightness": 100})
+        elif a.cmd == "perkey":
+            with open(a.file) as f:
+                raw = json.load(f)
+            led_colors = {}
+            for k, v in raw.items():
+                zm, lm = k.split(":")
+                led_colors[(int(zm, 0), int(lm, 0))] = scale(parse_hex_color(v), a.brightness)
+            kb.set_perkey(led_colors)
+            save_last({"effect": "static",
+                       "perkey": {k: list(v) for k, v in led_colors.items()},
+                       "brightness": 100})
+        elif a.cmd == "profile" and a.pcmd == "load":
+            try:
+                doc = profstore.load(a.name)
+            except (OSError, ValueError) as ex:
+                print(f"Error: {ex}", file=sys.stderr)
+                return 1
+            save_last(doc)
+            apply_state(kb, doc)
+        elif a.cmd == "mirror":
+            from legion_rgb.murals import run_mirror
+            save_last({"effect": "mirror", "brightness": a.brightness})
+            print("Mirroring screen... Ctrl+C to stop.")
+            try:
+                run_mirror(kb, a.brightness, a.fps)
+            except KeyboardInterrupt:
+                pass
+            except RuntimeError as ex:
+                print(f"Error: {ex}", file=sys.stderr)
+                return 1
+        elif a.cmd == "reactive":
+            from legion_rgb.reactive import run_reactive
+            base = parse_hex_color(a.colors[0]) if a.colors else (0, 180, 255)
+            save_last({"effect": "reactive", "colors": [list(base)] * 4, "brightness": a.brightness})
+            print("Type-ripple... Ctrl+C to stop.")
+            try:
+                run_reactive(kb, base, a.brightness)
+            except KeyboardInterrupt:
+                pass
+            except RuntimeError as ex:
+                print(f"Error: {ex}", file=sys.stderr)
+                return 1
+        elif a.cmd == "audio":
+            from legion_rgb.audiofx import run_audio
+            base = parse_hex_color(a.colors[0]) if a.colors else (0, 180, 255)
+            print("Audio pulse (demo mapping)... Ctrl+C to stop.")
+            try:
+                run_audio(kb, base, a.brightness, demo=True)
+            except KeyboardInterrupt:
+                pass
         elif a.cmd == "identify":
             cmd_identify(kb)
         elif a.cmd == "off":
             kb.off()
-            save_last({"effect": "Static", "colors": [[0, 0, 0]] * 4, "brightness": 0})
+            save_last({"effect": "static", "colors": [[0, 0, 0]] * 4, "brightness": 0})
         elif a.cmd == "hardware":
             kb.hardware_mode()
-            save_last({"effect": "Hardware"})
+            save_last({"effect": "hardware"})
         print(f"OK: {a.cmd} applied to {dev}")
         return 0
     except PermissionError:
@@ -117,8 +362,8 @@ def main():
               "sudo udevadm control --reload-rules && sudo udevadm trigger",
               file=sys.stderr)
         return 1
-    except (ValueError, OSError) as e:
-        print(f"Error: {e}", file=sys.stderr)
+    except (ValueError, OSError) as ex:
+        print(f"Error: {ex}", file=sys.stderr)
         return 1
 
 

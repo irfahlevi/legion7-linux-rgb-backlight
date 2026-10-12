@@ -66,19 +66,43 @@ def _command(op):
 
 def build_frame(group_colors, brightness=100):
     """group_colors: {0xA1: (r,g,b), ...}; returns list of packets."""
-    packets = []
+    perkey = {}
     for zone, (_name, ids) in ZONES.items():
         if zone not in group_colors:
             continue
         r, g, b = scale(group_colors[zone], brightness)
-        for start in range(0, len(ids), MAX_LEDS_PER_PACKET):
-            chunk = ids[start:start + MAX_LEDS_PER_PACKET]
+        for led in ids:
+            perkey[(zone, led)] = (r, g, b)
+    return build_perkey_frame(perkey)
+
+
+def build_perkey_frame(led_colors):
+    """led_colors: {(zone, led_id): (r,g,b)}; returns list of packets.
+
+    LEDs are grouped by zone to respect MAX_LEDS_PER_PACKET. Unknown
+    (zone, led) pairs are ignored so ISO/JP unions never break a layout.
+    """
+    from collections import defaultdict
+    by_zone = defaultdict(dict)
+    for (zone, led), color in led_colors.items():
+        if zone not in ZONES:
+            continue
+        by_zone[zone][led] = color
+    packets = []
+    for zone, (_name, _ids) in ZONES.items():
+        mapping = by_zone.get(zone)
+        if not mapping:
+            continue
+        items = sorted(mapping.items())
+        for start in range(0, len(items), MAX_LEDS_PER_PACKET):
+            chunk = items[start:start + MAX_LEDS_PER_PACKET]
             pkt = bytearray(REPORT_LEN)
             pkt[0] = REPORT_ID
             pkt[1] = zone
             pkt[2] = len(chunk)
-            for i, led in enumerate(chunk):
-                pkt[4 + i * 4:8 + i * 4] = bytes((led, r, g, b))
+            for i, (led, (r, g, b)) in enumerate(chunk):
+                pkt[4 + i * 4:8 + i * 4] = bytes((led & 0xFF, r & 0xFF,
+                                                  g & 0xFF, b & 0xFF))
             packets.append(bytes(pkt))
     return packets
 
@@ -98,6 +122,14 @@ class LegionDirect:
             raise ValueError("brightness must be 0-100")
         self.software_mode()
         for pkt in build_frame(group_colors, brightness):
+            send_feature_report(self.hidraw, pkt)
+
+    def set_perkey(self, led_colors):
+        """led_colors: {(zone, led_id): (r,g,b)} already brightness-scaled."""
+        if not led_colors:
+            raise ValueError("no LEDs given")
+        self.software_mode()
+        for pkt in build_perkey_frame(led_colors):
             send_feature_report(self.hidraw, pkt)
 
     def off(self):
